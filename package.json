@@ -1,0 +1,24 @@
+{
+  "name": "fluxloan",
+  "version": "1.0.0",
+  "description": "Non custodial multi lender flash liquidity protocol powered by wallet native capital.",
+  "license": "MIT",
+  "scripts": {
+    "clean": "hardhat clean",
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "coverage": "hardhat coverage",
+    "gas": "REPORT_GAS=true hardhat test"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "hardhat": "^2.22.17",
+    "solidity-coverage": "^0.8.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.2.0"
+  }
+}

@@ -2,5 +2,6 @@
 pragma solidity 0.8.26;
 
 library Errors {
-
+    error InvalidFeeBps();
+    error TokenNotWhitelisted();
 }

@@ -3,8 +3,11 @@ pragma solidity 0.8.26;
 
 import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
 import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 import { IFluxLoan } from "./interfaces/IFluxLoan.sol";
+import { IFluxLoanReceiver } from "./interfaces/IFluxLoanReceiver.sol";
 import { Errors } from "./libraries/Errors.sol";
 import { Events } from "./libraries/Events.sol";
 
@@ -16,13 +19,7 @@ import { Events } from "./libraries/Events.sol";
 contract FluxLoan is IFluxLoan, Ownable, ReentrancyGuard {
     /// @dev Basis points denominator.
     uint16 private constant MAX_BPS = 10_000;
-
-    /**
-     * @dev Tracks lender registration status for a token.
-     * lender => token => isRegistered
-     */
-    mapping(address lender => mapping(address token => bool isRegistered))
-        private s_registeredLenders;
+    using SafeERC20 for IERC20;
 
     /// @dev Tracks whether a token is approved for protocol usage.
     mapping(address token => bool isWhitelisted)
@@ -33,6 +30,14 @@ contract FluxLoan is IFluxLoan, Ownable, ReentrancyGuard {
 
     /// @dev Percentage of flash loan fee retained by protocol.
     uint16 private s_platformFeeShareBps;
+
+    /**
+    * @dev Tracks lender contribution during flash execution.
+    */
+    struct LenderContribution {
+        address lender;
+        uint256 amount;
+    }
 
     /**
      * @param owner Address receiving protocol ownership.
@@ -57,22 +62,108 @@ contract FluxLoan is IFluxLoan, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Registers lender liquidity for a whitelisted token.
-     * @param token ERC20 token address.
-     */
-    function registerLender(
-        address token
-    ) external {
-        if (!s_whitelistedTokens[token]) {
-            revert Errors.TokenNotWhitelisted();
+    * @dev Sources liquidity from approved lenders.
+    * @param token ERC20 token address.
+    * @param lenders Ordered lender list.
+    * @param amount Required liquidity amount.
+    * @param receiver Liquidity receiver address.
+    */
+    function _sourceLiquidity(
+        address token,
+        address[] calldata lenders,
+        uint256 amount,
+        address receiver
+    )
+        internal
+        returns (
+            LenderContribution[] memory contributions,
+            uint256 contributionCount
+        )
+    {
+        IERC20 erc20Token = IERC20(token);
+
+        contributions = new LenderContribution[](lenders.length);
+
+        uint256 accumulatedAmount;
+        uint256 lenderCount = lenders.length;
+
+        for (uint256 i; i < lenderCount; ) {
+            address lender = lenders[i];
+
+            uint256 lenderBalance = erc20Token.balanceOf(lender);
+
+            if (lenderBalance == 0) {
+                unchecked {
+                    ++i;
+                }
+
+                continue;
+            }
+
+            uint256 lenderAllowance = erc20Token.allowance(
+                lender,
+                address(this)
+            );
+
+            if (lenderAllowance == 0) {
+                unchecked {
+                    ++i;
+                }
+
+                continue;
+            }
+
+            uint256 usableAmount = lenderBalance < lenderAllowance
+                ? lenderBalance
+                : lenderAllowance;
+
+            uint256 remainingAmount = amount - accumulatedAmount;
+
+            if (usableAmount > remainingAmount) {
+                usableAmount = remainingAmount;
+            }
+
+            if (usableAmount == 0) {
+                unchecked {
+                    ++i;
+                }
+
+                continue;
+            }
+
+            erc20Token.safeTransferFrom(
+                lender,
+                receiver,
+                usableAmount
+            );
+
+            contributions[contributionCount] = LenderContribution({
+                lender: lender,
+                amount: usableAmount
+            });
+
+            ++contributionCount;
+
+            accumulatedAmount += usableAmount;
+
+            emit Events.LiquiditySourced(
+                lender,
+                token,
+                usableAmount
+            );
+
+            if (accumulatedAmount == amount) {
+                break;
+            }
+
+            unchecked {
+                ++i;
+            }
         }
 
-        s_registeredLenders[msg.sender][token] = true;
-
-        emit Events.LenderRegistered(
-            msg.sender,
-            token
-        );
+        if (accumulatedAmount != amount) {
+            revert Errors.InsufficientLiquidity();
+        }
     }
 
     /**
@@ -139,18 +230,6 @@ contract FluxLoan is IFluxLoan, Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Returns lender registration status for token.
-     * @param lender Lender address.
-     * @param token ERC20 token address.
-     */
-    function isLenderRegistered(
-        address lender,
-        address token
-    ) external view returns (bool) {
-        return s_registeredLenders[lender][token];
-    }
-
-    /**
      * @notice Returns borrower flash fee in basis points.
      */
     function getFlashFeeBps()
@@ -170,5 +249,102 @@ contract FluxLoan is IFluxLoan, Ownable, ReentrancyGuard {
         returns (uint16)
     {
         return s_platformFeeShareBps;
+    }
+
+    /**
+    * @notice Executes atomic flash liquidity operation.
+    * @param token ERC20 token address.
+    * @param lenders Ordered lender list.
+    * @param amount Required liquidity amount.
+    * @param receiver Borrower receiver contract.
+    * @param data Arbitrary execution calldata.
+    */
+    function executeFlashLoan(
+        address token,
+        address[] calldata lenders,
+        uint256 amount,
+        address receiver,
+        bytes calldata data
+    ) external nonReentrant {
+        if (!s_whitelistedTokens[token]) {
+            revert Errors.TokenNotWhitelisted();
+        }
+
+        IERC20 erc20Token = IERC20(token);
+
+        uint256 balanceBefore = erc20Token.balanceOf(
+            address(this)
+        );
+
+        uint256 fee = (amount * s_flashFeeBps) / MAX_BPS;
+
+        (
+            LenderContribution[] memory contributions,
+            uint256 contributionCount
+        ) = _sourceLiquidity(
+            token,
+            lenders,
+            amount,
+            receiver
+        );
+
+        IFluxLoanReceiver(receiver).executeOperation(
+            msg.sender,
+            token,
+            amount,
+            fee,
+            data
+        );
+
+        uint256 balanceAfter = erc20Token.balanceOf(
+            address(this)
+        );
+
+        uint256 receivedAmount = balanceAfter - balanceBefore;
+
+        uint256 requiredRepayment = amount + fee;
+
+        if (receivedAmount < requiredRepayment) {
+            revert Errors.InsufficientRepayment();
+        }
+
+        uint256 protocolFee = (
+            fee * s_platformFeeShareBps
+        ) / MAX_BPS;
+
+        uint256 lenderRewardPool = fee - protocolFee;
+
+        for (uint256 i; i < contributionCount; ) {
+            LenderContribution memory contribution =
+                contributions[i];
+
+            uint256 lenderReward = (
+                contribution.amount * lenderRewardPool
+            ) / amount;
+
+            erc20Token.safeTransfer(
+                contribution.lender,
+                contribution.amount + lenderReward
+            );
+
+            emit Events.LenderRepaid(
+                contribution.lender,
+                token,
+                contribution.amount,
+                lenderReward
+            );
+
+            unchecked {
+                ++i;
+            }
+        }
+
+        emit Events.FlashLoanExecuted(
+            msg.sender,
+            receiver,
+            token,
+            amount,
+            fee
+        );
     }
 }

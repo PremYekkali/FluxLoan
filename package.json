@@ -14,17 +14,15 @@
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.2.0",
     "@types/node": "^22.10.2",
     "hardhat": "^2.22.17",
-    "hardhat-gas-reporter": "^2.2.2",
+    "hardhat-gas-reporter": "^1.0.10",
     "prettier": "^3.4.2",
     "prettier-plugin-solidity": "^1.4.2",
     "solhint": "^5.0.5",
     "solidity-coverage": "^0.8.14",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.2"
-  },
-  "dependencies": {
-    "@openzeppelin/contracts": "^5.2.0"
   }
 }

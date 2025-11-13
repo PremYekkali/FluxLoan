@@ -278,6 +278,8 @@ contract FluxLoan is IFluxLoan, Ownable, ReentrancyGuard {
 
         uint256 fee = (amount * s_flashFeeBps) / MAX_BPS;
 
+        uint256 requiredRepayment = amount + fee;
+
         (
             LenderContribution[] memory contributions,
             uint256 contributionCount
@@ -301,8 +303,6 @@ contract FluxLoan is IFluxLoan, Ownable, ReentrancyGuard {
         );
 
         uint256 receivedAmount = balanceAfter - balanceBefore;
-
-        uint256 requiredRepayment = amount + fee;
 
         if (receivedAmount < requiredRepayment) {
             revert Errors.InsufficientRepayment();
